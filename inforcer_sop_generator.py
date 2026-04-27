@@ -7,22 +7,18 @@ Two-phase workflow:
   Phase 1 - EXPORT
     Pull every policy from a tenant and write an Excel selection workbook
     (<tenant>_Policy_Selection.xlsx). Each policy row has an "Include"
-    dropdown (Yes/No). Policies that look like they match a canonical
-    control in the SOP template are pre-ticked as a starting point.
-    You review the workbook, tick/untick as needed, and save.
+    tick box. Tick the policies you want in the SOP and save.
+
+    Tick boxes use Excel 365's native checkbox cell where available and
+    fall back to a plain TRUE/FALSE dropdown on older Excel.
 
   Phase 2 - BUILD
     Read the ticked workbook, re-fetch the tenant's current policies,
     and build the SOP Word document from the template:
       * The 7 Part 2 tables (Entra, Defender, Intune, SharePoint, Teams,
-        M365 Admin Centre, Purview) keep their canonical control rows.
-      * Each canonical row is matched ONLY against ticked policies. Rows
-        with at least one ticked match have their "Policy Display Name"
-        column filled; rows with zero ticked matches are deleted.
-      * Ticked policies that don't match any canonical row are appended
-        to their target section as new control rows (Control = policy
-        name, Description = settings summary, Policy Display Name =
-        policy name).
+        M365 Admin Centre, Purview) keep their headers but their canonical
+        rows are cleared. Whatever you ticked in the workbook gets added
+        as the rows in those tables, routed by product.
       * Appendix A lists every un-ticked policy, grouped by product, so
         nothing from the tenant is silently dropped.
       * Appendix B carries the tenant metadata.
@@ -43,7 +39,7 @@ Usage
     # Phase 2 - build SOP from a ticked workbook
     python inforcer_sop_generator.py --from-selection output/Contoso_Policy_Selection.xlsx
 
-    # Legacy: one-shot auto-match (skips the selection step)
+    # One-shot: include every policy without the selection step
     python inforcer_sop_generator.py --auto-match --tenant "Contoso"
 
 Requires: Python 3.9+, `requests`, `python-docx`, `openpyxl`.
@@ -103,8 +99,7 @@ _XLSX_HEADER_ROW = 5           # 1-based; row with column headers
 _XLSX_FIRST_DATA_ROW = 6       # 1-based; first policy row
 _XLSX_COLS = [
     "Include", "Policy Name", "Product", "Primary Group", "Secondary Group",
-    "Suggested Section", "Matches Template Control", "Settings Summary",
-    "Policy ID",
+    "Suggested Section", "Settings Summary", "Policy ID",
 ]
 
 
@@ -283,11 +278,6 @@ def _policy_triple(policy: dict) -> tuple[str, str, str]:
     return (str(product), str(primary), str(secondary))
 
 
-def _policy_searchable_text(policy: dict) -> str:
-    prod, prim, sec = _policy_triple(policy)
-    return " | ".join([_policy_name(policy), prod, prim, sec]).lower()
-
-
 def _policy_settings_summary(policy: dict, max_chars: int = 600) -> str:
     """Compact, human-readable summary of a policy's configuration."""
     skip_keys = {
@@ -326,9 +316,8 @@ def _policy_severity(policy: dict) -> str:
 
 # ---------------------------------------------------------------------------
 # Lay-person Control / Description helpers (used when a selected policy is
-# appended to Part 2 as a new row because no canonical template control
-# matched). Goal: a short, readable Control name (<= ~10 words) and a one-
-# sentence plain-English Description, instead of raw JSON.
+# appended to Part 2 as a row). Goal: a short, readable Control name (<= ~10
+# words) and a one-sentence plain-English Description, instead of raw JSON.
 # ---------------------------------------------------------------------------
 
 # Tokens that show up in MSP policy prefixes and add no meaning for readers.
@@ -412,12 +401,9 @@ def _layperson_control_name(policy_name: str, max_words: int = 10) -> str:
     if not policy_name:
         return "Tenant policy"
 
-    # Split on common separators used in MSP naming conventions.
     tokens = re.split(r"\s*[-|/]\s*|_+", policy_name)
     tokens = [t.strip() for t in tokens if t and t.strip()]
 
-    # Drop prefix noise tokens ONLY while scanning from the left — keep
-    # meaningful tail tokens even if they happen to match noise.
     trimmed: list[str] = []
     dropped_leading = True
     for t in tokens:
@@ -431,8 +417,6 @@ def _layperson_control_name(policy_name: str, max_words: int = 10) -> str:
     platform = _detect_platform(policy_name)
     topic = _detect_topic(policy_name)
 
-    # Preferred form: "<Platform> <Topic> policy", else fall back to the
-    # trimmed tail tokens.
     if platform and topic:
         label = f"{platform} {topic} policy"
     elif topic:
@@ -444,7 +428,6 @@ def _layperson_control_name(policy_name: str, max_words: int = 10) -> str:
         tail = " ".join(trimmed[-3:])
         label = tail if "polic" in tail.lower() else f"{tail} policy"
 
-    # Enforce the max-word budget.
     words = label.split()
     if len(words) > max_words:
         words = words[:max_words]
@@ -469,10 +452,7 @@ def _count_settings(blob: Any) -> int:
 
 
 def _layperson_description(policy: dict, max_chars: int = 240) -> str:
-    """One-sentence plain-English description of what the policy configures.
-    Prefers an explicit description field if the policy carries one; else
-    builds a sentence from the detected platform/topic and a setting count."""
-    # 1. Use an explicit description if the payload carries one.
+    """One-sentence plain-English description of what the policy configures."""
     desc = _deep_find(policy, ("description", "policyDescription",
                                "summary", "notes"))
     if isinstance(desc, str):
@@ -482,7 +462,6 @@ def _layperson_description(policy: dict, max_chars: int = 240) -> str:
         if text:
             return text[: max_chars - 1].rstrip() + "..."
 
-    # 2. Otherwise, synthesise from the policy name + settings shape.
     name = _policy_name(policy)
     product, primary, secondary = _policy_triple(policy)
     haystack = " ".join([name, product, primary, secondary])
@@ -547,9 +526,6 @@ SECTION_PRODUCT_PATTERNS: list[tuple[int, re.Pattern]] = [
                    r"\b(autopilot|compliance\s*polic|update\s*ring|"
                    r"app\s*protection|laps)\b)",
                    re.IGNORECASE)),
-    # Defender now means Defender for Office 365 specifically: mail/O365
-    # signals, or the DfO abbreviation. Bare "defender" still falls back
-    # here but only after Intune has had its chance above.
     (1, re.compile(r"(\bdfo\b|"
                    r"\bdefender\s*for\s*(office|o365)\b|"
                    r"\b(safe\s*links?|safe\s*attachments?|"
@@ -580,10 +556,7 @@ def _section_index_for_product(product: str, fallback_text: str = "") -> int | N
 
 
 def _section_index_for_policy(policy: dict) -> int | None:
-    """Route a policy to its Part 2 section. Includes the policy name in
-    the haystack so naming-convention abbreviations (DfB, DfE, MDE, DfO)
-    route correctly even when the product/primary/secondary fields are
-    generic (e.g. product='Defender' for a DfB endpoint AV policy)."""
+    """Route a policy to its Part 2 section by product/name."""
     product, primary, secondary = _policy_triple(policy)
     name = _policy_name(policy)
     return _section_index_for_product(product, f"{primary} {secondary} {name}")
@@ -594,416 +567,6 @@ def _section_label_for_policy(policy: dict) -> str:
     if idx is None:
         return "(Appendix - no section match)"
     return SECTION_LABELS[idx]
-
-
-# ---------------------------------------------------------------------------
-# CONTROL_MATCHERS - canonical template controls.
-# (Unchanged from the previous version. The SOP template is authoritative
-# for which control labels exist; these rules decide which tenant policies
-# constitute evidence of each control.)
-# ---------------------------------------------------------------------------
-
-CONTROL_MATCHERS: dict[tuple[int, str], list[dict]] = {
-
-    # ---- 2.1 Entra ID -----------------------------------------------------
-    (0, "mfa for all users"): [{
-        "all":  [r"\b(mfa|multi[\s-]?factor)\b"],
-        "any":  [r"\ball[\s-]*users?\b", r"\beveryone\b",
-                 r"\brequire[\s-]*mfa\b", r"\bmfa[\s-]*enforcement\b"],
-        "none": [r"\badmin", r"privileg", r"\brisk\b", r"\bguest\b"],
-    }],
-    (0, "block legacy authentication"): [{
-        "all":  [r"\blegacy\b"],
-        "any":  [r"\bauth", r"\bprotocol", r"\bsign[\s-]*in"],
-    }],
-    (0, "mfa for admin roles"): [{
-        "all":  [r"\b(mfa|multi[\s-]?factor|phishing[\s-]*resistant)\b"],
-        "any":  [r"\badmin", r"privileg", r"\bdirectory\s*role"],
-    }, {
-        "all":  [r"\b(admin|privileged)\b"],
-        "any":  [r"\bcompliant\s*device\b", r"\bhybrid\s*join"],
-    }],
-    (0, "high sign-in risk"): [{
-        "all":  [r"\brisk"],
-        "any":  [r"\bsign[\s-]*in\b", r"\bsignin\b", r"\bsession\b"],
-    }],
-    (0, "high user risk"): [{
-        "all":  [r"\buser\s*risk\b"],
-    }, {
-        "all":  [r"\brisk"], "any": [r"\bpassword\s*reset\b", r"\bremediat"],
-    }],
-    (0, "require compliant device"): [{
-        "all":  [r"\bcompliant\s*device\b"],
-    }, {
-        "all":  [r"\b(compliant|hybrid[\s-]*join)"],
-        "any":  [r"\bdevice\b", r"\bgrant\b", r"\brequire\b"],
-        "none": [r"\badmin", r"privileg"],
-    }],
-    (0, "geographic block"): [{
-        "any":  [r"\bgeograph", r"\bcountry\b", r"\bnamed\s*location",
-                 r"\bblock\s*(country|location|region)", r"\bgeo[\s-]*block"],
-    }],
-    (0, "break-glass exclusions"): [{
-        "any":  [r"break[\s-]*glass", r"\bemergency\s*access\b",
-                 r"\bexclusion", r"\bexcluded\s*account"],
-    }],
-    (0, "authentication methods"): [{
-        "all":  [r"\bauthentication\s*method"],
-    }, {
-        "any":  [r"\bfido2?\b", r"\bauthenticator\s*app",
-                 r"\bpasswordless\b", r"\bauth\s*method\s*policy"],
-    }],
-    (0, "self-service password reset"): [{
-        "any":  [r"\bsspr\b", r"self[\s-]*service\s*password"],
-    }],
-    (0, "guest invitations"): [{
-        "all":  [r"\bguest\b"],
-        "any":  [r"\binvit", r"\bexternal\s*collaborat", r"b2b"],
-    }, {
-        "any":  [r"\bexternal\s*user\s*invit", r"\bguest\s*invit"],
-    }],
-    (0, "password protection"): [{
-        "any":  [r"\bbanned\s*password", r"\bpassword\s*protection",
-                 r"\bsmart\s*lockout", r"\bpassword\s*policy\b"],
-    }],
-
-    # ---- 2.2 Defender for Office 365 -------------------------------------
-    (1, "safe links"): [{
-        "any":  [r"\bsafe\s*links?\b", r"\batp\s*safe\s*links"],
-    }],
-    (1, "safe attachments"): [{
-        "any":  [r"\bsafe\s*attachments?\b", r"\batp\s*safe\s*attachments"],
-    }],
-    (1, "anti-phishing impersonation"): [{
-        "all":  [r"\banti[\s-]*phish"],
-    }, {
-        "any":  [r"\bimpersonat", r"\bphishing\s*policy"],
-    }],
-    (1, "anti-spam inbound"): [{
-        "all":  [r"\banti[\s-]*spam\b|\bspam\s*filter"],
-        "any":  [r"\binbound\b", r"\bhosted\s*content\s*filter", r"\bdefault\b"],
-        "none": [r"\boutbound\b"],
-    }, {
-        "all":  [r"\bspam"],
-        "any":  [r"\binbound\b", r"\bcontent\s*filter"],
-        "none": [r"\boutbound\b"],
-    }],
-    (1, "anti-spam outbound"): [{
-        "all":  [r"\boutbound"],
-        "any":  [r"\bspam\b", r"\bforward", r"\branslim"],
-    }],
-    (1, "anti-malware"): [{
-        "any":  [r"\banti[\s-]*malware\b", r"\bmalware\s*filter",
-                 r"\bmalware\s*policy"],
-    }],
-    (1, "preset security policy"): [{
-        "any":  [r"\bpreset\s*security", r"\bstandard\s*preset",
-                 r"\bstrict\s*preset"],
-    }],
-    (1, "quarantine policy"): [{
-        "all":  [r"\bquarantine"],
-    }],
-    (1, "zero-hour auto-purge"): [{
-        "any":  [r"zero[\s-]*hour", r"\bzap\b", r"auto[\s-]*purge"],
-    }],
-    (1, "user phishing report"): [{
-        "any":  [r"report[\s-]*phish", r"\buser\s*report", r"\bphish\s*submiss"],
-    }],
-    (1, "dkim signing"): [{
-        "any":  [r"\bdkim\b"],
-    }],
-    (1, "attack simulation"): [{
-        "any":  [r"\battack\s*simulat", r"\bphish\s*simulat",
-                 r"\bsimulated\s*phish"],
-    }],
-
-    # ---- 2.3 Intune -------------------------------------------------------
-    (2, "windows compliance"): [{
-        "all":  [r"\bwindows"],
-        "any":  [r"\bcompliance\s*polic", r"\bcompliant\b"],
-    }],
-    (2, "ios compliance"): [{
-        "all":  [r"\bios\b"],
-        "any":  [r"\bcompliance\s*polic", r"\bcompliant\b"],
-    }],
-    (2, "android compliance"): [{
-        "all":  [r"\bandroid\b"],
-        "any":  [r"\bcompliance\s*polic", r"\bcompliant\b"],
-    }],
-    (2, "macos compliance"): [{
-        "all":  [r"\bmac[\s-]*os\b|\bmacos\b"],
-        "any":  [r"\bcompliance\s*polic", r"\bcompliant\b"],
-    }],
-    (2, "windows endpoint protection"): [{
-        "all":  [r"\bwindows"],
-        "any":  [r"\bendpoint\s*protection\b", r"\bsmartscreen\b",
-                 r"\btamper\s*protection\b", r"\bfirewall\b"],
-        "none": [r"\bcompliance\s*polic"],
-    }],
-    (2, "bitlocker policy"): [{
-        "any":  [r"\bbitlocker\b"],
-    }],
-    (2, "filevault policy"): [{
-        "any":  [r"\bfilevault\b"],
-    }],
-    (2, "attack surface reduction"): [{
-        "any":  [r"attack\s*surface\s*reduction", r"\basr\b"],
-    }],
-    (2, "defender av"): [{
-        "all":  [r"\bdefender"],
-        "any":  [r"\bantivirus\b", r"\bav\b", r"\bendpoint\b"],
-        "none": [r"\bsafe\s*links", r"\bsafe\s*attachments", r"\banti[\s-]*phish"],
-    }],
-    (2, "app protection (mam)"): [{
-        "any":  [r"\bapp\s*protection\b", r"\bmam\b", r"\bmanaged\s*app"],
-    }],
-    (2, "update rings"): [{
-        "any":  [r"\bupdate\s*ring", r"\bwindows\s*update\b",
-                 r"\bwufb\b", r"\bfeature\s*update"],
-    }],
-    (2, "autopilot profile"): [{
-        "any":  [r"\bautopilot\b", r"\boobe\b", r"\benrollment\s*status\s*page",
-                 r"\besp\b"],
-    }],
-    (2, "laps"): [{
-        "any":  [r"\blaps\b", r"local\s*admin(istrator)?\s*password"],
-    }],
-
-    # ---- 2.4 SharePoint --------------------------------------------------
-    (3, "tenant external sharing"): [{
-        "any":  [r"\bexternal\s*sharing\b", r"\bsharing\s*capab",
-                 r"\banyone\s*link"],
-        "none": [r"\bdefault\s*link\s*type", r"\blink\s*expir"],
-    }],
-    (3, "default link type"): [{
-        "any":  [r"\bdefault\s*(sharing\s*)?link", r"\blink\s*type",
-                 r"\bdefault\s*link"],
-    }],
-    (3, "anyone link expiry"): [{
-        "all":  [r"\banyone|\banonymous"],
-        "any":  [r"\bexpir"],
-    }, {
-        "all":  [r"\blink"], "any": [r"\bexpir"],
-    }],
-    (3, "unmanaged device access"): [{
-        "any":  [r"\bunmanaged\s*device", r"\bconditional\s*access\s*policy",
-                 r"\blimited\s*access\b", r"\bbrowser[\s-]*only"],
-    }],
-    (3, "onedrive sync restriction"): [{
-        "all":  [r"\bonedrive|\bsync"],
-        "any":  [r"\brestrict", r"\bdomain[\s-]*join", r"\bcompliant\b",
-                 r"\ballowed\s*domain"],
-    }],
-    (3, "guest expiration"): [{
-        "all":  [r"\bguest"],
-        "any":  [r"\bexpir", r"\baccess\s*review"],
-    }],
-    (3, "site creation"): [{
-        "any":  [r"\bsite\s*creation\b", r"\bcreate\s*site",
-                 r"\brestrict\s*site"],
-    }],
-    (3, "versioning"): [{
-        "any":  [r"\bversion(ing|s)\b", r"\bversion\s*histor"],
-    }],
-    (3, "guest re-share"): [{
-        "all":  [r"\bguest"],
-        "any":  [r"\bre[\s-]*shar", r"\breshar", r"\bshar(e|ing)"],
-        "none": [r"\bexpir"],
-    }],
-    (3, "block legacy auth"): [{
-        "all":  [r"\blegacy"],
-        "any":  [r"\bauth"],
-    }],
-    (3, "idle session sign-out"): [{
-        "any":  [r"\bidle\s*session", r"\bsession\s*timeout",
-                 r"\bsign[\s-]*out", r"\bsession\s*sign[\s-]*out"],
-    }],
-
-    # ---- 2.5 Teams --------------------------------------------------------
-    (4, "external access (federation)"): [{
-        "any":  [r"\bexternal\s*access\b", r"\bfederation\b",
-                 r"\ballowed\s*domain", r"\bmeeting\s*federation"],
-    }],
-    (4, "guest access"): [{
-        "all":  [r"\bguest"],
-        "any":  [r"\baccess\b", r"\bpolicy\b", r"\bsetting"],
-        "none": [r"\banonymous\b"],
-    }],
-    (4, "meeting policy (global)"): [{
-        "all":  [r"\bmeeting"],
-        "any":  [r"\bpolicy\b", r"\blobby\b", r"\bglobal\b"],
-        "none": [r"\brecording\s*policy\b", r"\bmessag"],
-    }],
-    (4, "messaging policy (global)"): [{
-        "all":  [r"\bmessag"],
-        "any":  [r"\bpolicy\b", r"\bglobal\b", r"\bgiphy\b"],
-    }],
-    (4, "app permission policy"): [{
-        "all":  [r"\bapp\s*permission"],
-    }, {
-        "all":  [r"\bapp"], "any": [r"\bpermission", r"\bblock\s*app"],
-    }],
-    (4, "app setup policy"): [{
-        "any":  [r"\bapp\s*setup\b", r"\bpinned\s*app",
-                 r"\bapp\s*pin"],
-    }],
-    (4, "calling policy"): [{
-        "any":  [r"\bcalling\s*policy\b", r"\bvoice\s*policy\b",
-                 r"\bemergency\s*call", r"\bvoicemail\b"],
-    }],
-    (4, "live events"): [{
-        "any":  [r"\blive\s*event"],
-    }],
-    (4, "skype consumer federation"): [{
-        "any":  [r"\bskype\s*consumer", r"\bskype\b.*\bconsumer\b",
-                 r"consumer\s*federation"],
-    }],
-    (4, "anonymous meeting join"): [{
-        "any":  [r"\banonymous\s*(user|join|meeting)", r"\blobby\b.*\banonymous",
-                 r"\banonymous\s*participant"],
-    }],
-    (4, "recording and transcription"): [{
-        "any":  [r"\brecording\b", r"\btranscription\b",
-                 r"\brecord\s*meeting"],
-    }],
-
-    # ---- 2.6 M365 Admin Centre / Exchange --------------------------------
-    (5, "mailbox audit"): [{
-        "any":  [r"\bmailbox\s*audit", r"\baudit\s*default",
-                 r"\baudit\s*log\s*enable"],
-    }],
-    (5, "block external auto-forward"): [{
-        "any":  [r"\bauto[\s-]*forward", r"\bexternal\s*forward",
-                 r"\bremote\s*domain\b"],
-    }],
-    (5, "external sender tag"): [{
-        "any":  [r"\bexternal\s*(sender|banner|tag)", r"\bexternalinoutlook"],
-    }],
-    (5, "disable legacy protocols"): [{
-        "all":  [r"\blegacy\s*protocol|\bpop3?\b|\bimap\b|\bsmtp\s*auth"],
-    }, {
-        "any":  [r"\bpop\b.*\bimap\b", r"\bbasic\s*auth"],
-    }],
-    (5, "anti-spoof transport rule"): [{
-        "all":  [r"\bspoof"],
-    }, {
-        "all":  [r"\btransport\s*rule"], "any": [r"\bspoof", r"\bimpersonat"],
-    }],
-    (5, "accepted domains"): [{
-        "any":  [r"\baccepted\s*domain"],
-    }],
-    (5, "connector hygiene"): [{
-        "all":  [r"\bconnector"],
-        "any":  [r"\binbound\b", r"\boutbound\b", r"\bpartner\b", r"\bhygien"],
-    }],
-    (5, "self-service purchase"): [{
-        "any":  [r"self[\s-]*service\s*purchase", r"\bmspurchase",
-                 r"\buser\s*purchas"],
-    }],
-    (5, "app consent"): [{
-        "any":  [r"\bapp\s*consent\b", r"\buser\s*consent\b",
-                 r"\bapplication\s*consent\b", r"\badmin\s*consent\s*workflow"],
-    }],
-    (5, "forms external sharing"): [{
-        "all":  [r"\bforms?\b"],
-        "any":  [r"\bexternal\b", r"\bsharing\b", r"\bshar"],
-    }],
-    (5, "privileged identity management"): [{
-        "any":  [r"\bpim\b", r"privileged\s*identity\s*management",
-                 r"\beligible\s*assignment", r"\bprivileged\s*role"],
-    }],
-    (5, "dmarc policy"): [{
-        "any":  [r"\bdmarc\b"],
-    }],
-
-    # ---- 2.7 Purview ------------------------------------------------------
-    (6, "unified audit log"): [{
-        "any":  [r"\bunified\s*audit", r"\baudit\s*log", r"\baudit\s*retention"],
-    }],
-    (6, "sensitivity labels"): [{
-        "any":  [r"\bsensitivity\s*label\b", r"\binformation\s*protection\s*label"],
-        "none": [r"\blabel\s*policy\b"],
-    }],
-    (6, "label policy"): [{
-        "any":  [r"\blabel\s*policy\b", r"\bpublish\s*label",
-                 r"\blabel\s*publishing"],
-    }],
-    (6, "dlp email - pii"): [{
-        "all":  [r"\bdlp\b|\bdata\s*loss"],
-        "any":  [r"\bemail\b", r"\bexchange\b", r"\bmail\b"],
-    }],
-    (6, "dlp sharepoint/onedrive"): [{
-        "all":  [r"\bdlp\b|\bdata\s*loss"],
-        "any":  [r"\bsharepoint\b", r"\bonedrive\b"],
-    }],
-    (6, "dlp teams"): [{
-        "all":  [r"\bdlp\b|\bdata\s*loss"],
-        "any":  [r"\bteams\b", r"\bchat\b"],
-    }],
-    (6, "dlp endpoint"): [{
-        "all":  [r"\bdlp\b|\bdata\s*loss"],
-        "any":  [r"\bendpoint\b", r"\bdevice\b", r"\bremovable\s*media"],
-    }],
-    (6, "retention - email"): [{
-        "all":  [r"\bretention"],
-        "any":  [r"\bemail\b", r"\bexchange\b", r"\bmail\b", r"\bmailbox\b"],
-    }],
-    (6, "retention - sharepoint/onedrive"): [{
-        "all":  [r"\bretention"],
-        "any":  [r"\bsharepoint\b", r"\bonedrive\b"],
-    }],
-    (6, "retention - teams chat"): [{
-        "all":  [r"\bretention"],
-        "any":  [r"\bteams\b", r"\bchat\b"],
-    }],
-    (6, "insider risk - departing employee"): [{
-        "all":  [r"\binsider\s*risk"],
-    }, {
-        "any":  [r"\bdeparting\s*(employee|user)", r"\btermin"],
-    }],
-    (6, "communication compliance"): [{
-        "any":  [r"\bcommunication\s*compliance\b", r"\bcomms?\s*compliance\b"],
-    }],
-}
-
-
-def _rule_matches(text: str, rule: dict) -> bool:
-    for pat in rule.get("all") or []:
-        if not re.search(pat, text):
-            return False
-    any_pats = rule.get("any") or []
-    if any_pats and not any(re.search(p, text) for p in any_pats):
-        return False
-    for pat in rule.get("none") or []:
-        if re.search(pat, text):
-            return False
-    return True
-
-
-def _policy_matches_control(policy: dict, section_idx: int,
-                            control_label: str) -> bool:
-    key = (section_idx, control_label.strip().lower())
-    rules = CONTROL_MATCHERS.get(key)
-    if not rules:
-        return False
-    text = _policy_searchable_text(policy)
-    return any(_rule_matches(text, r) for r in rules)
-
-
-def _suggested_controls_for_policy(policy: dict) -> list[str]:
-    """Return every canonical control label this policy would match,
-    in 'Section -> Control' form. Used purely as a hint in the Excel."""
-    sec_idx = _section_index_for_policy(policy)
-    if sec_idx is None:
-        return []
-    text = _policy_searchable_text(policy)
-    hits: list[str] = []
-    for (sidx, label), rules in CONTROL_MATCHERS.items():
-        if sidx != sec_idx:
-            continue
-        if any(_rule_matches(text, r) for r in rules):
-            hits.append(f"{SECTION_LABELS[sidx]} -> {label.title()}")
-    return hits
 
 
 # ---------------------------------------------------------------------------
@@ -1018,6 +581,256 @@ def _require_openpyxl() -> None:
         )
 
 
+def _coerce_tick(value: Any) -> bool:
+    """Read the Include cell. Accepts native bools, TRUE/FALSE, Yes/No,
+    1/0, and the string 'on' (case-insensitive)."""
+    if value is None or value == "":
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    s = str(value).strip().lower()
+    return s in {"true", "yes", "y", "1", "on", "x", "✓", "☑", "checked"}
+
+
+# ---- Excel 365 native tick box injection ----------------------------------
+#
+# openpyxl can't write Excel 365's native checkbox cells directly. We save
+# TRUE/FALSE booleans first (so the file always opens) and then re-zip the
+# .xlsx to add the FeaturePropertyBag + cellMetadata parts that Excel 365
+# uses to render those cells as clickable tick boxes. On any failure we
+# leave the workbook as-is - it still works as a TRUE/FALSE dropdown.
+
+_FPB_NS = "http://schemas.microsoft.com/office/spreadsheetml/2022/featurepropertybag"
+_FPB_REL_TYPE = "http://schemas.microsoft.com/office/2022/11/relationships/FeaturePropertyBag"
+_METADATA_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata"
+_FPB_CONTENT_TYPE = "application/vnd.ms-excel.featurepropertybag+xml"
+_METADATA_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"
+
+_FPB_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f'<FeaturePropertyBags xmlns="{_FPB_NS}">'
+    '<bag type="Checkbox"/>'
+    '</FeaturePropertyBags>'
+)
+
+_METADATA_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    f' xmlns:xfpb="{_FPB_NS}">'
+    '<metadataTypes count="1">'
+    '<metadataType name="XLBPRBAG" minSupportedVersion="120000" copy="1"'
+    ' pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1"'
+    ' clearFormats="1" clearComments="1" assign="1" coerce="1" cellMeta="1"/>'
+    '</metadataTypes>'
+    '<futureMetadata name="XLBPRBAG" count="1">'
+    '<bk><extLst>'
+    '<ext uri="{2bcaaf7d-bbb6-4c08-92e8-5db0d6cf2293}">'
+    '<xfpb:fpb fpbi="0"/>'
+    '</ext>'
+    '</extLst></bk>'
+    '</futureMetadata>'
+    '<cellMetadata count="1">'
+    '<bk><rc t="1" v="0"/></bk>'
+    '</cellMetadata>'
+    '</metadata>'
+)
+
+
+def _inject_excel365_checkboxes(xlsx_path: Path, sheet_part: str,
+                                first_row: int, last_row: int,
+                                column: int) -> None:
+    """Convert TRUE/FALSE cells in `column` (rows first_row..last_row of
+    `sheet_part`) into Excel 365 native checkbox cells. Best-effort: on
+    any failure the file is left untouched."""
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    if last_row < first_row:
+        return
+
+    col_letter = get_column_letter(column)
+    target_cells = {f"{col_letter}{r}" for r in range(first_row, last_row + 1)}
+    tmp_path = xlsx_path.with_suffix(xlsx_path.suffix + ".cbtmp")
+
+    main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rels_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+    ET.register_namespace("", main_ns)
+
+    try:
+        with zipfile.ZipFile(xlsx_path, "r") as zin:
+            names = zin.namelist()
+            parts = {n: zin.read(n) for n in names}
+
+        if sheet_part not in parts:
+            return
+
+        sheet_xml = _patch_sheet_checkboxes(parts[sheet_part], target_cells, main_ns)
+        if sheet_xml is None:
+            return
+        parts[sheet_part] = sheet_xml
+
+        if "xl/metadata.xml" not in parts:
+            parts["xl/metadata.xml"] = _METADATA_XML.encode("utf-8")
+
+        parts["xl/featurePropertyBag/featurePropertyBag.xml"] = (
+            _FPB_XML.encode("utf-8")
+        )
+
+        wb_rels_path = "xl/_rels/workbook.xml.rels"
+        if wb_rels_path in parts:
+            parts[wb_rels_path] = _patch_workbook_rels(parts[wb_rels_path], rels_ns)
+
+        ct_path = "[Content_Types].xml"
+        if ct_path in parts:
+            parts[ct_path] = _patch_content_types(parts[ct_path], ct_ns)
+
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            written: set[str] = set()
+            for name in names:
+                if name in parts:
+                    zout.writestr(name, parts[name])
+                    written.add(name)
+            for name, data in parts.items():
+                if name not in written:
+                    zout.writestr(name, data)
+
+        os.replace(tmp_path, xlsx_path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def _patch_sheet_checkboxes(xml_bytes: bytes, target_cells: set[str],
+                            main_ns: str) -> bytes | None:
+    from xml.etree import ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return None
+
+    ns = f"{{{main_ns}}}"
+    sheet_data = root.find(f"{ns}sheetData")
+    if sheet_data is None:
+        return None
+
+    touched = False
+    for row_el in sheet_data.findall(f"{ns}row"):
+        for c_el in row_el.findall(f"{ns}c"):
+            ref = c_el.get("r")
+            if ref not in target_cells:
+                continue
+            v_el = c_el.find(f"{ns}v")
+            v_text = (v_el.text or "").strip().lower() if v_el is not None else ""
+            if v_text in {"1", "true"}:
+                truth = "1"
+            elif v_text in {"0", "false", ""}:
+                truth = "0"
+            else:
+                truth = "0"
+            c_el.set("t", "b")
+            c_el.set("cm", "1")
+            for child in list(c_el):
+                c_el.remove(child)
+            new_v = ET.SubElement(c_el, f"{ns}v")
+            new_v.text = truth
+            touched = True
+
+    if not touched:
+        return None
+
+    body = ET.tostring(root, encoding="UTF-8")
+    if body.startswith(b"<?xml"):
+        return body
+    return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + body
+
+
+def _patch_workbook_rels(xml_bytes: bytes, rels_ns: str) -> bytes:
+    from xml.etree import ElementTree as ET
+
+    ET.register_namespace("", rels_ns)
+    root = ET.fromstring(xml_bytes)
+    ns = f"{{{rels_ns}}}"
+
+    have_metadata = False
+    have_fpb = False
+    used_ids: set[str] = set()
+    for rel in root.findall(f"{ns}Relationship"):
+        rid = rel.get("Id") or ""
+        used_ids.add(rid)
+        rtype = rel.get("Type") or ""
+        if rtype == _METADATA_REL_TYPE:
+            have_metadata = True
+        if rtype == _FPB_REL_TYPE:
+            have_fpb = True
+
+    def _new_id(prefix: str) -> str:
+        i = 1
+        while True:
+            cand = f"{prefix}{i}"
+            if cand not in used_ids:
+                used_ids.add(cand)
+                return cand
+            i += 1
+
+    if not have_metadata:
+        ET.SubElement(root, f"{ns}Relationship", {
+            "Id": _new_id("rIdMeta"),
+            "Type": _METADATA_REL_TYPE,
+            "Target": "metadata.xml",
+        })
+    if not have_fpb:
+        ET.SubElement(root, f"{ns}Relationship", {
+            "Id": _new_id("rIdFPB"),
+            "Type": _FPB_REL_TYPE,
+            "Target": "featurePropertyBag/featurePropertyBag.xml",
+        })
+
+    body = ET.tostring(root, encoding="UTF-8")
+    if body.startswith(b"<?xml"):
+        return body
+    return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + body
+
+
+def _patch_content_types(xml_bytes: bytes, ct_ns: str) -> bytes:
+    from xml.etree import ElementTree as ET
+
+    ET.register_namespace("", ct_ns)
+    root = ET.fromstring(xml_bytes)
+    ns = f"{{{ct_ns}}}"
+
+    have_metadata = False
+    have_fpb = False
+    for ov in root.findall(f"{ns}Override"):
+        part = ov.get("PartName") or ""
+        if part == "/xl/metadata.xml":
+            have_metadata = True
+        if part == "/xl/featurePropertyBag/featurePropertyBag.xml":
+            have_fpb = True
+
+    if not have_metadata:
+        ET.SubElement(root, f"{ns}Override", {
+            "PartName": "/xl/metadata.xml",
+            "ContentType": _METADATA_CONTENT_TYPE,
+        })
+    if not have_fpb:
+        ET.SubElement(root, f"{ns}Override", {
+            "PartName": "/xl/featurePropertyBag/featurePropertyBag.xml",
+            "ContentType": _FPB_CONTENT_TYPE,
+        })
+
+    body = ET.tostring(root, encoding="UTF-8")
+    if body.startswith(b"<?xml"):
+        return body
+    return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + body
+
+
 _PRIMARY_FILL = PatternFill("solid", fgColor="0B2545") if _HAVE_OPENPYXL else None
 _ACCENT_FILL  = PatternFill("solid", fgColor="D4A017") if _HAVE_OPENPYXL else None
 _META_FILL    = PatternFill("solid", fgColor="EEF2F6") if _HAVE_OPENPYXL else None
@@ -1026,7 +839,7 @@ _META_FILL    = PatternFill("solid", fgColor="EEF2F6") if _HAVE_OPENPYXL else No
 def write_selection_workbook(tenant: dict, policies: list[dict],
                              region: str, out_path: Path) -> int:
     """Write the per-tenant selection workbook. Returns the number of
-    policies that were pre-ticked (matched to any canonical control)."""
+    policy rows written."""
     _require_openpyxl()
 
     wb = Workbook()
@@ -1057,7 +870,7 @@ def write_selection_workbook(tenant: dict, policies: list[dict],
         c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     # ---- Data rows -----------------------------------------------------
-    pretick_count = 0
+    settings_col = _XLSX_COLS.index("Settings Summary") + 1
     row = _XLSX_FIRST_DATA_ROW
     for p in policies:
         pid = _policy_id(p)
@@ -1066,27 +879,24 @@ def write_selection_workbook(tenant: dict, policies: list[dict],
         sec_idx = _section_index_for_policy(p)
         suggested_section = SECTION_LABELS[sec_idx] if sec_idx is not None \
             else "(Appendix)"
-        hits = _suggested_controls_for_policy(p)
-        matches = "\n".join(hits) if hits else ""
         settings = _policy_settings_summary(p, max_chars=1500)
-        include_default = "Yes" if hits else "No"
-        if hits:
-            pretick_count += 1
 
         values = [
-            include_default, name, product, primary, secondary,
-            suggested_section, matches, settings, pid,
+            False, name, product, primary, secondary,
+            suggested_section, settings, pid,
         ]
         for col_idx, v in enumerate(values, start=1):
             c = ws.cell(row=row, column=col_idx, value=v)
             c.alignment = Alignment(
-                horizontal="left", vertical="top",
-                wrap_text=(col_idx in (7, 8)),   # wrap matches and settings
+                horizontal="center" if col_idx == 1 else "left",
+                vertical="center" if col_idx == 1 else "top",
+                wrap_text=(col_idx == settings_col),
             )
+        ws.row_dimensions[row].height = 15
         row += 1
 
     # ---- Formatting: widths, freeze, autofilter, data validation ------
-    widths = {1: 12, 2: 42, 3: 22, 4: 28, 5: 28, 6: 28, 7: 44, 8: 64, 9: 32}
+    widths = {1: 12, 2: 42, 3: 22, 4: 28, 5: 28, 6: 28, 7: 64, 8: 32}
     for col_idx, w in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = w
 
@@ -1097,12 +907,12 @@ def write_selection_workbook(tenant: dict, policies: list[dict],
     )
 
     dv = DataValidation(
-        type="list", formula1='"Yes,No"', allow_blank=False,
+        type="list", formula1='"TRUE,FALSE"', allow_blank=False,
         showDropDown=False,
     )
-    dv.error = "Enter Yes or No"
+    dv.error = "Enter TRUE or FALSE"
     dv.errorTitle = "Invalid Include value"
-    dv.prompt = "Tick Yes to include this policy in the SOP"
+    dv.prompt = "Tick the box to include this policy in the SOP"
     dv.promptTitle = "Include"
     ws.add_data_validation(dv)
     if last_row >= _XLSX_FIRST_DATA_ROW:
@@ -1110,7 +920,16 @@ def write_selection_workbook(tenant: dict, policies: list[dict],
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _save_workbook_safely(wb, out_path)
-    return pretick_count
+
+    if last_row >= _XLSX_FIRST_DATA_ROW:
+        _inject_excel365_checkboxes(
+            out_path,
+            sheet_part="xl/worksheets/sheet1.xml",
+            first_row=_XLSX_FIRST_DATA_ROW,
+            last_row=last_row,
+            column=1,
+        )
+    return max(row - _XLSX_FIRST_DATA_ROW, 0)
 
 
 def _save_workbook_safely(wb: Workbook, out_path: Path,
@@ -1143,7 +962,7 @@ def read_selection_workbook(xlsx_path: Path) -> dict:
          "tenant_name": str,
          "tenant_id":   str,
          "region":      str,
-         "selected_ids": set[str],        # policies marked Yes
+         "selected_ids": set[str],        # policies whose tick box is on
          "all_rows":     list[dict],      # every row with its fields
        }
     """
@@ -1176,24 +995,26 @@ def read_selection_workbook(xlsx_path: Path) -> dict:
             f"{_XLSX_COLS}, got {[ws.cell(row=_XLSX_HEADER_ROW, column=i+1).value for i in range(len(_XLSX_COLS))]}"
         )
 
+    pid_col = _XLSX_COLS.index("Policy ID") + 1
+    settings_col = _XLSX_COLS.index("Settings Summary") + 1
+
     selected_ids: set[str] = set()
     all_rows: list[dict] = []
     row = _XLSX_FIRST_DATA_ROW
     while True:
         name = _cell_text(row, 2)
-        pid = _cell_text(row, 9)
+        pid = _cell_text(row, pid_col)
         if not name and not pid:
             break
-        include = _cell_text(row, 1).lower()
+        include_raw = ws.cell(row=row, column=1).value
         rec = {
-            "include":           include == "yes",
+            "include":           _coerce_tick(include_raw),
             "name":              name,
             "product":           _cell_text(row, 3),
             "primary":           _cell_text(row, 4),
             "secondary":         _cell_text(row, 5),
             "suggested_section": _cell_text(row, 6),
-            "matches_control":   _cell_text(row, 7),
-            "settings_summary":  _cell_text(row, 8),
+            "settings_summary":  _cell_text(row, settings_col),
             "policy_id":         pid,
         }
         all_rows.append(rec)
@@ -1325,9 +1146,11 @@ def _set_cell_text(cell, text: str) -> None:
 def _populate_section_tables(doc: Document,
                              selected: list[dict]
                              ) -> set[int]:
-    """Hybrid population: match canonical template rows against SELECTED
-    policies; delete rows with no match; then append any selected policies
-    routed to this section that weren't consumed by any canonical match.
+    """Populate Part 2 tables directly from the policies the user ticked.
+
+    For each of the 7 section tables we keep the header row, throw away
+    every canonical/template row underneath it, then add one row per
+    ticked policy that routes to that section.
 
     Returns the set of section indices that ended up with content.
     """
@@ -1342,51 +1165,25 @@ def _populate_section_tables(doc: Document,
     for sec_idx, table in enumerate(section_tables):
         if sec_idx >= 7:
             break
-        selected_candidates = by_section_selected.get(sec_idx, [])
-        used_ids: set[str] = set()
 
         rows = list(table.rows)
         tbl_el = table._tbl
 
-        # Clone a canonical row's XML BEFORE Pass 1 runs, so any Pass 2
+        # Clone the first data row's XML before deleting it, so newly
         # appended rows can inherit the canonical formatting (font,
-        # paragraph style, cell widths, borders, shading) instead of the
-        # bare-bones layout that table.add_row() produces.
+        # paragraph style, cell widths, borders, shading) instead of
+        # the bare-bones layout that table.add_row() produces.
         template_row_el = (
             copy.deepcopy(rows[1]._tr) if len(rows) >= 2 else None
         )
 
-        # -- Pass 1: walk existing canonical rows --
-        if len(rows) >= 2:
-            for row in rows[1:]:
-                cells = row.cells
-                if len(cells) < 4:
-                    continue
-                control_label = cells[0].text.strip()
-                if not control_label:
-                    continue
+        # Delete every existing data row (keep the header row only).
+        for row in rows[1:]:
+            tbl_el.remove(row._tr)
 
-                matched_names: list[str] = []
-                seen_names: set[str] = set()
-                for pol in selected_candidates:
-                    if _policy_matches_control(pol, sec_idx, control_label):
-                        used_ids.add(_policy_id(pol))
-                        name = _policy_name(pol)
-                        if not name or name in seen_names:
-                            continue
-                        seen_names.add(name)
-                        matched_names.append(name)
-
-                if matched_names:
-                    _set_cell_text(cells[3], "\n".join(sorted(matched_names)))
-                    populated_sections.add(sec_idx)
-                else:
-                    tbl_el.remove(row._tr)
-
-        # -- Pass 2: append selected policies that matched no canonical row --
-        leftovers = [p for p in selected_candidates
-                     if _policy_id(p) not in used_ids]
-        for pol in sorted(leftovers, key=lambda x: _policy_name(x).lower()):
+        # Append one row per ticked policy routed to this section.
+        candidates = by_section_selected.get(sec_idx, [])
+        for pol in sorted(candidates, key=lambda x: _policy_name(x).lower()):
             if template_row_el is not None:
                 new_tr = copy.deepcopy(template_row_el)
                 tbl_el.append(new_tr)
@@ -1715,10 +1512,9 @@ def run_export_phase(client: InforcerClient, region: str, out_dir: Path,
                  else f"{slug}_Policy_Selection_{count + 1}.xlsx")
         out_path = out_dir / fname
         try:
-            preticked = write_selection_workbook(t, policies, region, out_path)
+            written_count = write_selection_workbook(t, policies, region, out_path)
             print(f"  wrote {out_path}")
-            print(f"         policies: {len(policies)}   "
-                  f"pre-ticked as suggested: {preticked}")
+            print(f"         policies written: {written_count}")
             written.append(out_path)
         except PermissionError as exc:
             print(f"  SKIPPED {out_path} - file locked ({exc}).")
@@ -1794,8 +1590,8 @@ def run_build_phase(api_key: str, xlsx_path: Path, template_path: Path,
 
 def run_auto_match_phase(client: InforcerClient, template_path: Path,
                          out_dir: Path, tenants: list[dict]) -> None:
-    """Legacy one-shot: fetch, auto-match against CONTROL_MATCHERS with every
-    policy eligible, and build SOPs in one go. Equivalent to the old tool."""
+    """One-shot: fetch every policy and treat them all as selected. Skips
+    the Excel review step entirely - useful for first-pass drafts."""
     for t in tenants:
         name = _tenant_name(t)
         tid = _first(t, "id", "clientTenantId", "tenantId", default=None)
@@ -1811,7 +1607,6 @@ def run_auto_match_phase(client: InforcerClient, template_path: Path,
             continue
         slug = _slugify(name)
         out_path = out_dir / f"{slug}_SOP.docx"
-        # In auto-match mode every policy is a candidate for Part 2.
         try:
             build_sop(template_path, t, selected=policies, excluded=[],
                       out_path=out_path)
@@ -1848,8 +1643,8 @@ def parse_args() -> argparse.Namespace:
                    help="Phase 2: build an SOP from a ticked selection workbook. "
                         "Repeat to build SOPs from multiple workbooks.")
     p.add_argument("--auto-match", action="store_true",
-                   help="Legacy: build SOPs directly without the selection step "
-                        "(every policy is considered for Part 2).")
+                   help="One-shot: build SOPs directly without the selection step "
+                        "(every policy is included in Part 2).")
     return p.parse_args()
 
 
@@ -1914,7 +1709,7 @@ def main() -> int:
         print("Done.")
         return 0
 
-    # ---- Phase 1 and legacy auto-match both need the tenant list ------
+    # ---- Phase 1 and one-shot auto-match both need the tenant list ----
     client = InforcerClient(api_key, base_url)
     print(f"Fetching tenants from {base_url}/beta/tenants ...")
     try:
@@ -1951,9 +1746,8 @@ def main() -> int:
             print()
             print("Next step:")
             print("  1. Open each workbook in Excel.")
-            print("  2. Review the 'Include' column (Yes/No dropdown). "
-                  "Policies that already look like canonical controls are "
-                  "pre-ticked.")
+            print("  2. Tick the 'Include' column for the policies you want "
+                  "in the SOP.")
             print("  3. Save the workbook when you're happy.")
             print("  4. Re-run to build the SOP - e.g.:")
             for p in written:
@@ -1963,7 +1757,7 @@ def main() -> int:
 
     # mode == "auto"
     print(f"Using template: {template_path}")
-    print("Auto-match mode - building SOPs without the selection step.")
+    print("Auto-match mode - including every policy in the SOP.")
     run_auto_match_phase(client, template_path, out_dir, selected)
     print("Done.")
     return 0
