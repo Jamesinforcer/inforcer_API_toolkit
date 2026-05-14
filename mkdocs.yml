@@ -1,0 +1,64 @@
+site_name: Inforcer SOP Toolkit
+site_description: Windows tool for generating tenant-specific SOP documents from Inforcer-managed M365 tenants.
+site_url: https://jamesinforcer.github.io/inforcer_API_toolkit/
+repo_url: https://github.com/Jamesinforcer/inforcer_API_toolkit
+repo_name: Jamesinforcer/inforcer_API_toolkit
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Workflow:
+      - Overview: workflow/index.md
+      - Phase 1 — Export: workflow/phase-1-export.md
+      - Phase 2 — Review: workflow/phase-2-review.md
+      - Phase 3 — Build: workflow/phase-3-build.md
+  - Command-Line Flags: cli.md
+  - Troubleshooting: troubleshooting.md
